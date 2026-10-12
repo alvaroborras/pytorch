@@ -6130,6 +6130,25 @@ class TestLinalg(TestCase):
                     else:
                         self.assertEqual(B_left, X @ A_adj)
 
+    @skipCUDAIfNoCusolver
+    @skipCPUIfNoLapack
+    @dtypes(*floating_and_complex_types())
+    @parametrize("lu_stride,pivots_stride", [(2, 2), (4, 0), (0, 0)])
+    @parametrize("left,adjoint", product((True, False), repeat=2))
+    def test_linalg_lu_solve_singleton_batch_strides(self, device, dtype, lu_stride, pivots_stride, left, adjoint):
+        A = torch.tensor([[[1., 3.], [2., 4.]], [[4., 1.], [2., 5.]]], device=device, dtype=dtype)
+        B = make_tensor((3, 2, 1), device=device, dtype=dtype)
+        LU, pivots = torch.linalg.lu_factor(A)
+        LU = LU.as_strided((2, 1, 2, 2), (4, lu_stride, 1, 2))
+        pivots = pivots.as_strided((2, 1, 2), (2, pivots_stride, 1))
+        self.assertTrue(LU.mT.is_contiguous())
+        self.assertTrue(pivots.is_contiguous())
+
+        B = B if left else B.mT
+        actual = torch.linalg.lu_solve(LU, pivots, B, left=left, adjoint=adjoint)
+        expected = torch.linalg.solve((A.mH if adjoint else A).unsqueeze(-3), B, left=left)
+        self.assertEqual(actual, expected)
+
     @onlyCPU
     @dtypes(*floating_and_complex_types())
     def test_linalg_lu_cpu_errors(self, device, dtype):
