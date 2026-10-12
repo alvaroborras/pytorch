@@ -29,7 +29,7 @@ from torch.testing._internal.common_utils import (
 from torch.testing._internal.common_device_type import (
     OpDTypes, onlyCPU, onlyCUDA, onlyNativeDeviceTypes, expectedFailureMeta, expectedFailureXPU, instantiate_device_type_tests, dtypes, dtypesIfCUDA,
     dtypesIfCPU, dtypesIfXPU, onlyAccelerator, largeMPSBufferTest, largeTensorTest, ops,
-    precisionOverride)
+    precisionOverride, skipXPUIf)
 from torch.testing._internal.common_methods_invocations import (
     ReductionOpInfo, ReductionPythonRefInfo, reduction_ops, reference_masked_ops)
 
@@ -1855,7 +1855,7 @@ class TestReductionsDevice(TestCase):
 
     @dtypes(torch.int32, torch.int64)
     @skipIfMPS
-    @skipIfXpu(msg="https://github.com/intel/torch-xpu-ops/issues/5092")
+    @skipXPUIf(True, "https://github.com/intel/torch-xpu-ops/issues/5092")
     def test_nansum_int_out_dtype_matches_inductor(self, device, dtype):
         # Eager/inductor parity for #183318.
         out_dtype = dtype
@@ -3766,7 +3766,7 @@ class TestReductionsDevice(TestCase):
         self.assertEqual(result_eager.shape, torch.Size([2, 2]))
 
 class TestReductions(TestCase):
-    hw_classification = HardwareClassification.GENERIC
+    hw_classification = HardwareClassification.CPU
 
     # TODO: kill map2_ (and similar) uses and update to compare with NumPy
     # only works on CPU since this uses map2_, which is only supported on CPU
