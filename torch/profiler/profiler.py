@@ -33,6 +33,8 @@ from torch.profiler._memory_profiler import MemoryProfile, MemoryProfileTimeline
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
+    from torch.distributed._collective_annotations import CollectiveAnnotationHandle
+
 
 __all__ = [
     "supported_activities",
@@ -151,12 +153,19 @@ class CuspyConfig(_ProfilerExtensionConfig):
             dependency edges.
         enable_event_node_ids (bool, optional): Associate CUDA events with CUDA
             graph event-record nodes.
+        annotate_collectives (bool, optional): Tag the kernels of c10d
+            collectives with ``record_param_comms``-style fields. Coalesced and
+            batched p2p collectives are not tagged. Pass ``False`` when a
+            wrapper already annotates them, e.g. with
+            ``add_collective_metadata``: both write the same per-collective
+            fields, so one overwrites the other.
     """
 
     enable_cuda_sync_events: bool = False
     enable_environment_counters: bool = False
     enable_graph_dependencies: bool = False
     enable_event_node_ids: bool = False
+    annotate_collectives: bool = True
 
     def _to_config_entries(self) -> dict[str, str]:
         return {}
@@ -421,6 +430,7 @@ class _KinetoProfile:
         # The ProfilerObserver driving the shared Cuspy singleton this session; window opened
         # at start, closed at stop (_cuspy_window_id), exported by export_chrome_trace.
         self._cuspy_profiler_observer: Any = None
+        self._collective_hooks: CollectiveAnnotationHandle | None = None
         self._cuspy_window_id: int | None = None
         # cuspy exports synchronously by default (like the stock profiler).
         # {"cuspy_async_export": true} hands the merge+write off-thread, joined by
@@ -579,6 +589,22 @@ class _KinetoProfile:
             # Open the trace window here (stamps the start boundary, native clock, no
             # device sync); records before this are excluded from the window.
             self._cuspy_profiler_observer.open_window()
+            # Not at prepare_trace: warmup collectives would pay for annotations
+            # the window drops.
+            if (
+                self._cuspy_config is not None
+                and self._cuspy_config.annotate_collectives
+                and torch.distributed.is_available()
+            ):
+                from torch.distributed._collective_annotations import (
+                    register_collective_annotation_hooks,
+                )
+
+                observer = self._cuspy_profiler_observer
+                self._collective_hooks = register_collective_annotation_hooks(
+                    observer._push_collective_kernel_metadata,
+                    observer._pop_collective_kernel_metadata,
+                )
 
         if self.profile_memory:
             self.add_metadata_json("profile_memory", "1")
@@ -630,6 +656,9 @@ class _KinetoProfile:
             # window (end boundary, native clock, no device sync), queuing it for deferred
             # export; the observer is kept alive past stop for the async write.
             prof._set_active_cuspy_profiler_observer(None)
+            if self._collective_hooks is not None:
+                self._collective_hooks.remove()
+                self._collective_hooks = None
             if self._cuspy_profiler_observer is not None:
                 self._cuspy_window_id = self._cuspy_profiler_observer.close_window()
         self.profiler.__exit__(None, None, None)
