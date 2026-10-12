@@ -6130,11 +6130,11 @@ class TestLinalg(TestCase):
                     else:
                         self.assertEqual(B_left, X @ A_adj)
 
-    @skipCUDAIfNoCusolver
+    @onlyCPU
     @skipCPUIfNoLapack
     @dtypes(*floating_and_complex_types())
     @parametrize("lu_stride,pivots_stride", [(2, 2), (4, 0), (0, 0)])
-    @parametrize("left,adjoint", product((True, False), repeat=2))
+    @parametrize("left,adjoint", list(product((True, False), repeat=2)))
     def test_linalg_lu_solve_singleton_batch_strides(self, device, dtype, lu_stride, pivots_stride, left, adjoint):
         A = torch.tensor([[[1., 3.], [2., 4.]], [[4., 1.], [2., 5.]]], device=device, dtype=dtype)
         B = make_tensor((3, 2, 1), device=device, dtype=dtype)
@@ -6148,6 +6148,34 @@ class TestLinalg(TestCase):
         actual = torch.linalg.lu_solve(LU, pivots, B, left=left, adjoint=adjoint)
         expected = torch.linalg.solve((A.mH if adjoint else A).unsqueeze(-3), B, left=left)
         self.assertEqual(actual, expected)
+
+    @onlyCPU
+    @skipCPUIfNoLapack
+    @dtypes(torch.double)
+    @parametrize("mode", (
+        subtest("jacfwd", decorators=[skipIfTorchDynamo("lu_factor forward AD hits an inference-mode assertion")]),
+        "jacrev",
+    ))
+    def test_linalg_lu_solve_nested_vmap(self, device, dtype, mode):
+        A = torch.tensor([[[2., 1.], [1., 3.]], [[4., 1.], [2., 5.]]], device=device, dtype=dtype)
+        B = torch.tensor([[[1.], [2.]]], device=device, dtype=dtype)
+        LU, pivots = torch.linalg.lu_factor(A)
+        actual = torch.func.vmap(
+            lambda lu, p: torch.func.vmap(lambda b: torch.linalg.lu_solve(lu, p, b))(B)
+        )(LU, pivots)
+        self.assertEqual(actual, torch.linalg.solve(A, B).unsqueeze(-3))
+
+        A1 = torch.tensor([[1., 0.], [1., 1.]], device=device, dtype=dtype)
+        b1 = torch.tensor([[1.], [-1.]], device=device, dtype=dtype)
+
+        def f(x):
+            lu, p = torch.linalg.lu_factor(A[0] + x * A1)
+            return torch.linalg.lu_solve(lu, p, B[0] + x * b1).sum()
+
+        xs = torch.tensor([0.25, 0.75], device=device, dtype=dtype)
+        derivative = getattr(torch.func, mode)(f)
+        expected = torch.stack([derivative(x) for x in xs])
+        self.assertEqual(torch.func.vmap(derivative)(xs), expected)
 
     @onlyCPU
     @dtypes(*floating_and_complex_types())
